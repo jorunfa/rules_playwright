@@ -28,10 +28,25 @@ fn cft_min_revision(browser_name: &str) -> Option<u32> {
     }
 }
 
+/// Returns the first revision whose ARM64 Linux build ships as Chrome for Testing,
+/// or `None` if it never does. chromium switched in Playwright 1.63 (revision
+/// 1243); chromium-tip-of-tree was dropped before publishing one.
+fn cft_linux_arm64_min_revision(browser_name: &str) -> Option<u32> {
+    match browser_name {
+        "chromium" | "chromium-headless-shell" => Some(1243),
+        _ => None,
+    }
+}
+
 /// Builds the Chrome for Testing download path for the given chromium-family
 /// browser and platform, or `None` if that platform keeps using the legacy
-/// chromium archives (currently ARM64 Linux, which CfT does not publish).
-fn cft_download_path(browser_name: &str, platform: &Platform, browser_version: &str) -> Option<String> {
+/// chromium archives (ARM64 Linux, see `cft_linux_arm64_min_revision`).
+fn cft_download_path(
+    browser_name: &str,
+    platform: &Platform,
+    browser_version: &str,
+    revision: u32,
+) -> Option<String> {
     let is_headless = browser_name.ends_with("-headless-shell");
     let platform_group: PlatformGroup = platform.clone().into();
     let suffix = match platform_group {
@@ -41,8 +56,13 @@ fn cft_download_path(browser_name: &str, platform: &Platform, browser_version: &
         PlatformGroup::MacosX86_64 => "mac-x64/chrome-mac-x64.zip",
         PlatformGroup::MacosArm64 if is_headless => "mac-arm64/chrome-headless-shell-mac-arm64.zip",
         PlatformGroup::MacosArm64 => "mac-arm64/chrome-mac-arm64.zip",
-        // ARM64 Linux still ships the legacy chromium build even on CfT releases.
-        PlatformGroup::LinuxArm64 => return None,
+        PlatformGroup::LinuxArm64
+            if !cft_linux_arm64_min_revision(browser_name).is_some_and(|min| revision >= min) =>
+        {
+            return None
+        }
+        PlatformGroup::LinuxArm64 if is_headless => "linux-arm64/chrome-headless-shell-linux-arm64.zip",
+        PlatformGroup::LinuxArm64 => "linux-arm64/chrome-linux-arm64.zip",
     };
     Some(format!("builds/cft/{browser_version}/{suffix}"))
 }
@@ -155,16 +175,23 @@ pub fn get_browser_rules(
                             // based one for most platforms. The threshold is keyed off
                             // the base revision so older browsers.json files keep using
                             // the legacy URLs.
+                            let base_revision = browser.revision.parse::<u32>().ok();
                             let uses_cft = cft_min_revision(&browser.name)
-                                .zip(browser.revision.parse::<u32>().ok())
+                                .zip(base_revision)
                                 .map(|(min_revision, base_revision)| base_revision >= min_revision)
                                 .unwrap_or(false);
                             let http_file_path = if uses_cft {
                                 browser
                                     .browser_version
                                     .as_deref()
-                                    .and_then(|version| {
-                                        cft_download_path(&browser.name, platform, version)
+                                    .zip(base_revision)
+                                    .and_then(|(version, base_revision)| {
+                                        cft_download_path(
+                                            &browser.name,
+                                            platform,
+                                            version,
+                                            base_revision,
+                                        )
                                     })
                                     .unwrap_or_else(|| template.replace("%s", revision))
                             } else {
